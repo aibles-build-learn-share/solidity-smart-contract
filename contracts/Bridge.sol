@@ -2,9 +2,10 @@
 pragma solidity ^0.8.4;
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-contract Bridge is OwnableUpgradeable, UUPSUpgradeable {
+contract Bridge is OwnableUpgradeable, UUPSUpgradeable, ReentrancyGuardUpgradeable {
     struct TransferInfo {
         uint256 amount;
         uint256 serviceFee;
@@ -26,31 +27,22 @@ contract Bridge is OwnableUpgradeable, UUPSUpgradeable {
     bool public frozen;
     uint256 public platformFee;
 
-    event TransferInitiated(
-        uint256 indexed transfer_id,
-        address indexed from,
-        string indexed to,
-        uint256 amount,
-        string targetChain
-    );
-
-    event TokensReleased(
-        uint256 indexed transfer_id,
-        string indexed from,
-        address indexed to,
-        uint256 amount
-    );
+    event TransferInitiated(uint256 transferId, address from, string to, uint256 amount, string targetChain);
+    event TokensReleased(uint256 transferId, string from, address to, uint256 amount);
 
     modifier onlyRelayer() {
-        require(
-            relayers[msg.sender] == true,
-            "Caller is not the registered relayer"
-        );
+        require(relayers[msg.sender] == true, "Caller is not the registered relayer");
         _;
     }
 
     modifier isNotFrozen() {
         require(!frozen, "Bridge is frozen by admin");
+        _;
+    }
+
+    modifier notContract() {
+        require(!_isContract(msg.sender), "Contract not allowed");
+        require(msg.sender == tx.origin, "Proxy contract not allowed");
         _;
     }
 
@@ -63,6 +55,7 @@ contract Bridge is OwnableUpgradeable, UUPSUpgradeable {
     ) public initializer returns (bool) {
         __Ownable_init();
         __UUPSUpgradeable_init();
+        __ReentrancyGuard_init();
 
         minaToken = _token;
         serviceFee = _serviceFee;
@@ -74,17 +67,13 @@ contract Bridge is OwnableUpgradeable, UUPSUpgradeable {
         return true;
     }
 
-    function _authorizeUpgrade(address newImplementation)
-        internal
-        override
-        onlyOwner
-    {}
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     function initiateTransfer(
         string memory to,
         uint256 amount,
         string memory targetChain
-    ) public payable isNotFrozen {
+    ) public payable isNotFrozen notContract {
         require(chains[targetChain], "Unsupported chain");
         require(msg.value == serviceFee + platformFee, "Missing service fee");
         require(amount >= minDeposit, "Minimum amount required");
@@ -100,32 +89,18 @@ contract Bridge is OwnableUpgradeable, UUPSUpgradeable {
         transferInfo.targetChain = targetChain;
         transferInfo.isExist = true;
         outboundTransfers[nextOutboundTransferId] = transferInfo;
-
-        emit TransferInitiated(
-            nextOutboundTransferId,
-            msg.sender,
-            to,
-            amount,
-            targetChain
-        );
         nextOutboundTransferId = nextOutboundTransferId + 1;
+
+        emit TransferInitiated(nextOutboundTransferId, msg.sender, to, amount, targetChain);
     }
 
     function confirmTransfer(uint256 transfer_id) public onlyRelayer isNotFrozen {
-        require(
-            nextConfirmOutboundTransferId < nextOutboundTransferId,
-            "All transfers are confirmed"
-        );
-
-        require(
-            nextConfirmOutboundTransferId == transfer_id,
-            "Invalid transfer id"
-        );
+        require(nextConfirmOutboundTransferId < nextOutboundTransferId, "All transfers are confirmed");
+        require(nextConfirmOutboundTransferId == transfer_id, "Invalid transfer id");
 
         TransferInfo memory transferInfo = outboundTransfers[transfer_id];
-        payable(address(msg.sender)).transfer(transferInfo.serviceFee);
-
         nextConfirmOutboundTransferId = nextConfirmOutboundTransferId + 1;
+        payable(address(msg.sender)).transfer(transferInfo.serviceFee);
     }
 
     function releaseToken(
@@ -133,7 +108,7 @@ contract Bridge is OwnableUpgradeable, UUPSUpgradeable {
         string memory from,
         address to,
         uint256 amount
-    ) public onlyRelayer isNotFrozen {
+    ) public onlyRelayer isNotFrozen nonReentrant {
         require(transfer_id == nextInboundTransferId, "Invalid transfer id");
         IERC20(minaToken).transfer(to, amount);
         nextInboundTransferId += 1;
@@ -169,10 +144,7 @@ contract Bridge is OwnableUpgradeable, UUPSUpgradeable {
     }
 
     function forceWithdraw(address to) public onlyOwner {
-        IERC20(minaToken).transfer(
-            to,
-            IERC20(minaToken).balanceOf(address(this))
-        );
+        IERC20(minaToken).transfer(to, IERC20(minaToken).balanceOf(address(this)));
     }
 
     function forceRegisterChain(string memory chain) public onlyOwner {
@@ -194,5 +166,12 @@ contract Bridge is OwnableUpgradeable, UUPSUpgradeable {
     function forceUnfreeze() public onlyOwner {
         frozen = false;
     }
-}
 
+    function _isContract(address account) internal view returns (bool) {
+        uint256 size;
+        assembly {
+            size := extcodesize(account)
+        }
+        return size > 0;
+    }
+}
