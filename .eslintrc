@@ -1,0 +1,16 @@
+{
+  "root": true,
+  "extends": ["plugin:prettier/recommended"],
+  "overrides": [
+    {
+      "files": ["**/*.ts"],
+      "extends": [
+        "plugin:prettier/recommended"
+      ],
+      "parser": "@typescript-eslint/parser",
+      "parserOptions": {
+        "ecmaVersion": 11
+      }
+    }
+  ]
+}
